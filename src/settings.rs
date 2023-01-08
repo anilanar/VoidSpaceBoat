@@ -126,4 +126,53 @@ mod tests {
             Some("Nameless".to_string())
         );
     }
+
+    #[test]
+    fn it_loads_int_settings() {
+        let lua = Lua::new().unwrap();
+        let settings = Settings::new(&lua).unwrap();
+        let value = settings.get("main.RIVERNE_PORTERS").unwrap();
+        assert_eq!(
+            if let SettingsValue::Int(value) = value {
+                Some(value.to_owned())
+            } else {
+                None
+            },
+            Some(120)
+        );
+    }
+
+    #[test]
+    fn it_loads_bool_settings() {
+        let lua = Lua::new().unwrap();
+        let settings = Settings::new(&lua).unwrap();
+        let value = settings
+            .get("main.USE_ADOULIN_WEAPON_SKILL_CHANGES")
+            .unwrap();
+        assert_eq!(
+            if let SettingsValue::Bool(value) = value {
+                Some(value.to_owned())
+            } else {
+                None
+            },
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn it_loads_float_settings() {
+        let lua = Lua::new().unwrap();
+        let settings = Settings::new(&lua).unwrap();
+        let value = settings
+            .get("main.CASKET_DROP_RATE")
+            .unwrap();
+        assert_eq!(
+            if let SettingsValue::Float(value) = value {
+                Some(value.to_owned())
+            } else {
+                None
+            },
+            Some(0.1)
+        );
+    }
 }
