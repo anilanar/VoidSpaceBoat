@@ -26,7 +26,7 @@ impl Lua {
         .exec()?;
 
         let print =
-            mlua.create_function(|lua, args: mlua::Variadic<String>| {
+            mlua.create_function(|_, args: mlua::Variadic<String>| {
                 log::info!("{}", args.iter().format(" "));
                 Ok(())
             })?;
@@ -52,7 +52,7 @@ impl Lua {
 
     pub fn eval<'a, R: mlua::FromLuaMulti<'a>>(
         self: &'a Lua,
-        code: &String,
+        code: &str,
     ) -> Result<R, ServerError> {
         self.mlua.load(code).eval().map_err(ServerError::LuaError)
     }

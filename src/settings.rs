@@ -10,7 +10,8 @@ pub struct Settings {
 #[derive(Debug)]
 pub enum SettingsValue {
     Bool(bool),
-    Number(f64),
+    Int(i64),
+    Float(f64),
     String(String),
     BadString(Vec<u8>),
 }
@@ -54,10 +55,8 @@ impl Settings {
                     mlua::Value::Boolean(bool) => {
                         Some(SettingsValue::Bool(bool))
                     }
-                    mlua::Value::Integer(n) => {
-                        Some(SettingsValue::Number(n as f64))
-                    }
-                    mlua::Value::Number(n) => Some(SettingsValue::Number(n)),
+                    mlua::Value::Integer(n) => Some(SettingsValue::Int(n)),
+                    mlua::Value::Number(n) => Some(SettingsValue::Float(n)),
                     mlua::Value::String(s) => {
                         let bytes = s.as_bytes();
                         let value = String::from_utf8(bytes.to_owned())
