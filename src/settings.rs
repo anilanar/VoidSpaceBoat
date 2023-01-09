@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::os::unix::prelude::OsStringExt;
 
 use itertools::Itertools;
 
@@ -7,6 +8,11 @@ use super::lua::Lua;
 
 pub struct Settings {
     settings: HashMap<String, SettingsValue>,
+}
+
+#[derive(Debug)]
+pub enum Error {
+    ParseValueError { key: String },
 }
 
 /// Represents possible values a setting can take in settings lua files.
@@ -19,6 +25,50 @@ pub enum SettingsValue {
     /// Represents non-standard utf8 strings which might contain FFXI specific
     /// byte sequences that are only understood by the FFXI client.
     BadString(Vec<u8>),
+    Unknown,
+}
+
+impl<'lua> mlua::ToLua<'lua> for SettingsValue {
+    fn to_lua(self, lua: &'lua mlua::Lua) -> mlua::Result<mlua::Value<'lua>> {
+        match self {
+            SettingsValue::Bool(n) => Ok(mlua::Value::Boolean(n)),
+            SettingsValue::Int(n) => Ok(mlua::Value::Integer(n)),
+            SettingsValue::Float(n) => Ok(mlua::Value::Number(n)),
+            SettingsValue::String(n) => {
+                Ok(mlua::Value::String(lua.create_string(&n)?))
+            }
+            SettingsValue::BadString(n) => {
+                Ok(mlua::Value::String(lua.create_string(&n)?))
+            }
+            SettingsValue::Unknown => Err(mlua::Error::ToLuaConversionError {
+                from: "SettingsValue::Unknown",
+                to: "mlua::Value",
+                message: None,
+            }),
+        }
+    }
+}
+
+impl<'lua> mlua::FromLua<'lua> for SettingsValue {
+    fn from_lua(
+        lua_value: mlua::Value<'lua>,
+        _lua: &'lua mlua::Lua,
+    ) -> mlua::Result<Self> {
+        match lua_value {
+            mlua::Value::Boolean(n) => Ok(SettingsValue::Bool(n)),
+            mlua::Value::Integer(n) => Ok(SettingsValue::Int(n)),
+            mlua::Value::Number(n) => Ok(SettingsValue::Float(n)),
+            mlua::Value::String(n) => {
+                let bytes = n.as_bytes();
+                Ok(String::from_utf8(bytes.to_owned())
+                    .map(SettingsValue::String)
+                    .unwrap_or_else(|_| {
+                        SettingsValue::BadString(bytes.to_owned())
+                    }))
+            }
+            _ => Ok(SettingsValue::Unknown),
+        }
+    }
 }
 
 impl Settings {
@@ -87,33 +137,42 @@ fn populate_hashmap(
         let (outer_key, outer_value) =
             outer_entry.map_err(ServerError::LuaError)?;
 
-        for inner_entry in outer_value.pairs::<String, mlua::Value>() {
+        for inner_entry in outer_value.pairs::<String, SettingsValue>() {
             let (inner_key, inner_value) =
-                inner_entry.map_err(ServerError::LuaError)?;
+                inner_entry.map_err(|err| match err {
+                    mlua::Error::FromLuaConversionError {
+                        from: _,
+                        to: _,
+                        message: _,
+                    } => ServerError::SettingsError(Error::ParseValueError {
+                        key: format!("{}.{}", outer_key, "?"),
+                    }),
+                    _ => ServerError::LuaError(err),
+                })?;
 
-            let value = match inner_value {
-                mlua::Value::Boolean(bool) => Some(SettingsValue::Bool(bool)),
-                mlua::Value::Integer(n) => Some(SettingsValue::Int(n)),
-                mlua::Value::Number(n) => Some(SettingsValue::Float(n)),
-                mlua::Value::String(s) => {
-                    let bytes = s.as_bytes();
-                    let value = String::from_utf8(bytes.to_owned())
-                        .map(SettingsValue::String)
-                        .unwrap_or_else(|_| {
-                            SettingsValue::BadString(bytes.to_owned())
-                        });
-                    Some(value)
-                }
-                _ => None,
-            };
-
-            if let Some(value) = value {
-                settings.insert(format!("{}.{}", outer_key, inner_key), value);
-            }
+            settings
+                .insert(format!("{}.{}", outer_key, inner_key), inner_value);
         }
     }
 
     Ok(settings)
+}
+
+/// Finds env variables of the format `XI_a_b`, then proceeeds to add
+/// `("a.b", value)` pair to settings and also sets `xi.settings.a.b` to that
+/// value.
+/// Values will be tried to be parsed as int, float, bool in this order.
+/// Otherwise they will take a string value.
+fn apply_env_variables(settings: &mut HashMap<String, SettingsValue>) {
+    for (k, v) in std::env::vars().filter_map(|(k, v)| {
+        if let ["XI", outer, inner] =
+            k.as_str().split('_').collect::<Vec<&str>>().as_slice()
+        {
+            Some((format!("{}.{}", outer, inner), v))
+        } else {
+            None
+        }
+    }) {}
 }
 
 #[cfg(test)]
