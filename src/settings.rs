@@ -1,11 +1,12 @@
-use std::collections::HashMap;
-use std::os::unix::prelude::OsStringExt;
-
 use itertools::Itertools;
+use mlua::ToLua;
+use std::collections::HashMap;
+use std::str;
 
 use super::error::ServerError;
 use super::lua::Lua;
 
+#[derive(Debug)]
 pub struct Settings {
     settings: HashMap<String, SettingsValue>,
 }
@@ -16,7 +17,7 @@ pub enum Error {
 }
 
 /// Represents possible values a setting can take in settings lua files.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum SettingsValue {
     Bool(bool),
     Int(i64),
@@ -26,6 +27,17 @@ pub enum SettingsValue {
     /// byte sequences that are only understood by the FFXI client.
     BadString(Vec<u8>),
     Unknown,
+}
+
+impl SettingsValue {
+    fn from_str(s: &str) -> Self {
+        s.parse::<i64>()
+            .map(Self::Int)
+            .ok()
+            .or_else(|| s.parse::<f64>().map(Self::Float).ok())
+            .or_else(|| s.parse::<bool>().map(Self::Bool).ok())
+            .unwrap_or(Self::String(s.to_owned()))
+    }
 }
 
 impl<'lua> mlua::ToLua<'lua> for SettingsValue {
@@ -79,7 +91,11 @@ impl Settings {
         // load user settings
         load_lua_from_dir(lua, "settings")?;
 
+        // load settings from env vars
+        apply_env_variables(lua)?;
+
         let settings = populate_hashmap(lua)?;
+
         Ok(Settings { settings })
     }
 
@@ -159,51 +175,79 @@ fn populate_hashmap(
 }
 
 /// Finds env variables of the format `XI_a_b`, then proceeeds to add
-/// `("a.b", value)` pair to settings and also sets `xi.settings.a.b` to that
-/// value.
-/// Values will be tried to be parsed as int, float, bool in this order.
-/// Otherwise they will take a string value.
-fn apply_env_variables(settings: &mut HashMap<String, SettingsValue>) {
-    for (k, v) in std::env::vars().filter_map(|(k, v)| {
-        if let ["XI", outer, inner] =
-            k.as_str().split('_').collect::<Vec<&str>>().as_slice()
-        {
-            Some((format!("{}.{}", outer, inner), v))
-        } else {
+/// sets `xi.settings.a.b` to the relevant value.
+fn apply_env_variables(lua: &Lua) -> Result<(), ServerError> {
+    // lua indices start at 1
+    let mut idx: usize = 1;
+    let mut code: String = String::new();
+    let mut values: Vec<mlua::Value> = Vec::new();
+
+    for (k, v) in std::env::vars() {
+        let mut split = k.split('_');
+        (|| {
+            let xi = split.next()?;
+            if xi != "XI" {
+                return None::<()>;
+            }
+            let outer = split.next()?.to_lowercase();
+            let inner = split.join("_");
+
+            code.push_str(&format!(
+                "xi.settings.{}.{} = values[{}];\n",
+                outer, inner, idx
+            ));
+
+            values.push(SettingsValue::from_str(&v).to_lua(lua.mlua()).ok()?);
+
+            idx += 1;
+
             None
-        }
-    }) {}
+        })();
+    }
+
+    let fn_whole = format!(
+        r#"
+            function (values)
+                {}
+            end
+        "#,
+        code
+    );
+
+    lua.mlua()
+        .load(&fn_whole)
+        .eval::<mlua::Function>()
+        .map_err(ServerError::LuaError)?
+        .call::<_, ()>(values)
+        .map_err(ServerError::LuaError)
 }
 
 #[cfg(test)]
 
 mod tests {
+    use std::ffi::OsString;
+
     use super::Settings;
     use crate::{lua::Lua, settings::SettingsValue};
+    use envtestkit::lock::lock_test;
+    use envtestkit::set_env;
 
     #[test]
     fn it_executes_lua() {
         let lua = Lua::new().unwrap();
         Settings::new(&lua).unwrap();
-        let server_name: String = lua
+        let value: String = lua
             .eval(&"xi.settings.main.SERVER_NAME".to_owned())
             .unwrap();
-        assert_eq!(server_name, "Nameless");
+        assert_eq!(value, "Nameless");
     }
 
     #[test]
     fn it_loads_settings() {
         let lua = Lua::new().unwrap();
         let settings = Settings::new(&lua).unwrap();
-        let server_name = settings.get("main.SERVER_NAME").unwrap();
-        assert_eq!(
-            if let SettingsValue::String(name) = server_name {
-                Some(name.to_owned())
-            } else {
-                None
-            },
-            Some("Nameless".to_string())
-        );
+        let value = settings.get("main.SERVER_NAME").unwrap();
+        assert_eq!(value, &SettingsValue::String("Nameless".to_string()));
     }
 
     #[test]
@@ -211,14 +255,7 @@ mod tests {
         let lua = Lua::new().unwrap();
         let settings = Settings::new(&lua).unwrap();
         let value = settings.get("main.RIVERNE_PORTERS").unwrap();
-        assert_eq!(
-            if let SettingsValue::Int(value) = value {
-                Some(value.to_owned())
-            } else {
-                None
-            },
-            Some(120)
-        );
+        assert_eq!(value, &SettingsValue::Int(120));
     }
 
     #[test]
@@ -228,14 +265,7 @@ mod tests {
         let value = settings
             .get("main.USE_ADOULIN_WEAPON_SKILL_CHANGES")
             .unwrap();
-        assert_eq!(
-            if let SettingsValue::Bool(value) = value {
-                Some(value.to_owned())
-            } else {
-                None
-            },
-            Some(true)
-        );
+        assert_eq!(value, &SettingsValue::Bool(true));
     }
 
     #[test]
@@ -243,13 +273,43 @@ mod tests {
         let lua = Lua::new().unwrap();
         let settings = Settings::new(&lua).unwrap();
         let value = settings.get("main.CASKET_DROP_RATE").unwrap();
-        assert_eq!(
-            if let SettingsValue::Float(value) = value {
-                Some(value.to_owned())
-            } else {
-                None
-            },
-            Some(0.1)
-        );
+        assert_eq!(value, &SettingsValue::Float(0.1));
+    }
+
+    #[test]
+    fn it_loads_int_env_var_into_lua() {
+        let _lock = lock_test();
+        let _env = set_env(OsString::from("XI_MAIN_FOO_BAR"), "9999");
+
+        let lua = Lua::new().unwrap();
+        Settings::new(&lua).unwrap();
+
+        let value: i64 =
+            lua.eval(&"xi.settings.main.FOO_BAR".to_owned()).unwrap();
+        assert_eq!(value, 9999);
+    }
+
+    #[test]
+    fn it_loads_int_env_var() {
+        let _lock = lock_test();
+        let _env = set_env(OsString::from("XI_MAIN_FOO_BAR"), "9999");
+
+        let lua = Lua::new().unwrap();
+        let settings = Settings::new(&lua).unwrap();
+
+        let value = settings.get("main.FOO_BAR").unwrap();
+        assert_eq!(value, &SettingsValue::Int(9999));
+    }
+
+    #[test]
+    fn it_loads_bool_env_var() {
+        let _lock = lock_test();
+        let _env = set_env(OsString::from("XI_MAIN_FOO_BAR"), "false");
+
+        let lua = Lua::new().unwrap();
+        let settings = Settings::new(&lua).unwrap();
+
+        let value = settings.get("main.FOO_BAR").unwrap();
+        assert_eq!(value, &SettingsValue::Bool(false));
     }
 }

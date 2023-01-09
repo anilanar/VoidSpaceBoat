@@ -38,6 +38,10 @@ impl Lua {
         Ok(Lua { mlua })
     }
 
+    pub fn mlua<'a>(self: &'a Lua) -> &'a mlua::Lua {
+        &self.mlua
+    }
+
     pub fn execute_file(
         self: &Lua,
         path: &std::path::PathBuf,
