@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use itertools::Itertools;
+
 use super::error::ServerError;
 use super::lua::Lua;
 
@@ -21,7 +23,12 @@ pub enum SettingsValue {
 
 impl Settings {
     pub fn new(lua: &Lua) -> Result<Settings, ServerError> {
+        // load default settings
         load_lua_from_dir(lua, "settings/default")?;
+
+        // load user settings
+        load_lua_from_dir(lua, "settings")?;
+
         let settings = populate_hashmap(lua)?;
         Ok(Settings { settings })
     }
@@ -31,13 +38,14 @@ impl Settings {
     }
 }
 
-/// Reads all lua files in the given directory and loads them into `lua`, in
-/// whatever order OS reports them. Ignores non-lua files, if any.
+/// Reads all lua files in the given directory and loads them into `lua`, sorted by name. Ignores non-lua files, if any.
 fn load_lua_from_dir<P: AsRef<std::path::Path>>(
     lua: &Lua,
     path: P,
 ) -> Result<(), ServerError> {
     let root = std::env::current_dir().map_err(ServerError::IOError)?;
+
+    let mut paths = Vec::new();
 
     for entry in
         std::fs::read_dir(root.join(path)).map_err(ServerError::IOError)?
@@ -46,8 +54,14 @@ fn load_lua_from_dir<P: AsRef<std::path::Path>>(
         let path = entry.path();
         let is_lua = path.extension().map(|ext| ext == "lua").unwrap_or(false);
         if is_lua {
-            lua.execute_file(&path)?;
+            paths.push(path);
         }
+    }
+
+    paths.sort();
+
+    for path in paths {
+        lua.execute_file(&path)?;
     }
 
     Ok(())
