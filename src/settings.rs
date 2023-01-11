@@ -1,14 +1,14 @@
 use itertools::Itertools;
-use mlua::ToLua;
 use std::collections::HashMap;
 use std::str;
 
 use super::error::ServerError;
 use super::lua::Lua;
+use mlua::Value;
 
 #[derive(Debug)]
-pub struct Settings {
-    settings: HashMap<String, SettingsValue>,
+pub struct Settings<'lua> {
+    settings: HashMap<String, Value<'lua>>,
 }
 
 #[derive(Debug)]
@@ -16,75 +16,8 @@ pub enum Error {
     ParseValueError { key: String },
 }
 
-/// Represents possible values a setting can take in settings lua files.
-#[derive(Debug, PartialEq)]
-pub enum SettingsValue {
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    String(String),
-    /// Represents non-standard utf8 strings which might contain FFXI specific
-    /// byte sequences that are only understood by the FFXI client.
-    BadString(Vec<u8>),
-    Unknown,
-}
-
-impl SettingsValue {
-    fn from_str(s: &str) -> Self {
-        s.parse::<i64>()
-            .map(Self::Int)
-            .ok()
-            .or_else(|| s.parse::<f64>().map(Self::Float).ok())
-            .or_else(|| s.parse::<bool>().map(Self::Bool).ok())
-            .unwrap_or(Self::String(s.to_owned()))
-    }
-}
-
-impl<'lua> mlua::ToLua<'lua> for SettingsValue {
-    fn to_lua(self, lua: &'lua mlua::Lua) -> mlua::Result<mlua::Value<'lua>> {
-        match self {
-            SettingsValue::Bool(n) => Ok(mlua::Value::Boolean(n)),
-            SettingsValue::Int(n) => Ok(mlua::Value::Integer(n)),
-            SettingsValue::Float(n) => Ok(mlua::Value::Number(n)),
-            SettingsValue::String(n) => {
-                Ok(mlua::Value::String(lua.create_string(&n)?))
-            }
-            SettingsValue::BadString(n) => {
-                Ok(mlua::Value::String(lua.create_string(&n)?))
-            }
-            SettingsValue::Unknown => Err(mlua::Error::ToLuaConversionError {
-                from: "SettingsValue::Unknown",
-                to: "mlua::Value",
-                message: None,
-            }),
-        }
-    }
-}
-
-impl<'lua> mlua::FromLua<'lua> for SettingsValue {
-    fn from_lua(
-        lua_value: mlua::Value<'lua>,
-        _lua: &'lua mlua::Lua,
-    ) -> mlua::Result<Self> {
-        match lua_value {
-            mlua::Value::Boolean(n) => Ok(SettingsValue::Bool(n)),
-            mlua::Value::Integer(n) => Ok(SettingsValue::Int(n)),
-            mlua::Value::Number(n) => Ok(SettingsValue::Float(n)),
-            mlua::Value::String(n) => {
-                let bytes = n.as_bytes();
-                Ok(String::from_utf8(bytes.to_owned())
-                    .map(SettingsValue::String)
-                    .unwrap_or_else(|_| {
-                        SettingsValue::BadString(bytes.to_owned())
-                    }))
-            }
-            _ => Ok(SettingsValue::Unknown),
-        }
-    }
-}
-
-impl Settings {
-    pub fn new(lua: &Lua) -> Result<Settings, ServerError> {
+impl<'lua> Settings<'lua> {
+    pub fn new(lua: &'lua Lua) -> Result<Settings, ServerError> {
         // load default settings
         load_lua_from_dir(lua, "settings/default")?;
 
@@ -99,7 +32,7 @@ impl Settings {
         Ok(Settings { settings })
     }
 
-    pub fn get(self: &Settings, key: &str) -> Option<&SettingsValue> {
+    pub fn get(self: &Self, key: &str) -> Option<&Value<'lua>> {
         self.settings.get(key)
     }
 }
@@ -138,22 +71,20 @@ fn load_lua_from_dir<P: AsRef<std::path::Path>>(
 ///
 /// For example, if `xi.settings.foo.bar = 5`, then the hash map will contain
 /// `("foo.bar", SettingsValue::Int(5))` pair.
-fn populate_hashmap(
-    lua: &Lua,
-) -> Result<HashMap<String, SettingsValue>, ServerError> {
+fn populate_hashmap(lua: &Lua) -> Result<HashMap<String, Value>, ServerError> {
     let table = lua
         .globals()
         .get::<_, mlua::Table>("xi")
         .and_then(|table| table.get::<_, mlua::Table>("settings"))
         .map_err(ServerError::LuaError)?;
 
-    let mut settings = HashMap::<String, SettingsValue>::new();
+    let mut settings = HashMap::<String, Value>::new();
 
     for outer_entry in table.pairs::<String, mlua::Table>() {
         let (outer_key, outer_value) =
             outer_entry.map_err(ServerError::LuaError)?;
 
-        for inner_entry in outer_value.pairs::<String, SettingsValue>() {
+        for inner_entry in outer_value.pairs::<String, Value>() {
             let (inner_key, inner_value) =
                 inner_entry.map_err(|err| match err {
                     mlua::Error::FromLuaConversionError {
@@ -197,7 +128,7 @@ fn apply_env_variables(lua: &Lua) -> Result<(), ServerError> {
                 outer, inner, idx
             ));
 
-            values.push(SettingsValue::from_str(&v).to_lua(lua.mlua()).ok()?);
+            values.push(str_to_value(lua, &v).ok()?);
 
             idx += 1;
 
@@ -228,9 +159,10 @@ mod tests {
     use std::ffi::OsString;
 
     use super::Settings;
-    use crate::{lua::Lua, settings::SettingsValue};
+    use crate::lua::Lua;
     use envtestkit::lock::lock_test;
     use envtestkit::set_env;
+    use mlua::Value;
 
     #[test]
     fn it_executes_lua() {
@@ -247,7 +179,10 @@ mod tests {
         let lua = Lua::new().unwrap();
         let settings = Settings::new(&lua).unwrap();
         let value = settings.get("main.SERVER_NAME").unwrap();
-        assert_eq!(value, &SettingsValue::String("Nameless".to_string()));
+        assert_eq!(
+            value,
+            &Value::String(lua.mlua().create_string("Nameless").unwrap())
+        );
     }
 
     #[test]
@@ -255,7 +190,7 @@ mod tests {
         let lua = Lua::new().unwrap();
         let settings = Settings::new(&lua).unwrap();
         let value = settings.get("main.RIVERNE_PORTERS").unwrap();
-        assert_eq!(value, &SettingsValue::Int(120));
+        assert_eq!(value, &Value::Integer(120));
     }
 
     #[test]
@@ -265,7 +200,7 @@ mod tests {
         let value = settings
             .get("main.USE_ADOULIN_WEAPON_SKILL_CHANGES")
             .unwrap();
-        assert_eq!(value, &SettingsValue::Bool(true));
+        assert_eq!(value, &Value::Boolean(true));
     }
 
     #[test]
@@ -273,7 +208,7 @@ mod tests {
         let lua = Lua::new().unwrap();
         let settings = Settings::new(&lua).unwrap();
         let value = settings.get("main.CASKET_DROP_RATE").unwrap();
-        assert_eq!(value, &SettingsValue::Float(0.1));
+        assert_eq!(value, &Value::Number(0.1));
     }
 
     #[test]
@@ -298,7 +233,7 @@ mod tests {
         let settings = Settings::new(&lua).unwrap();
 
         let value = settings.get("main.FOO_BAR").unwrap();
-        assert_eq!(value, &SettingsValue::Int(9999));
+        assert_eq!(value, &Value::Integer(9999));
     }
 
     #[test]
@@ -310,6 +245,20 @@ mod tests {
         let settings = Settings::new(&lua).unwrap();
 
         let value = settings.get("main.FOO_BAR").unwrap();
-        assert_eq!(value, &SettingsValue::Bool(false));
+        assert_eq!(value, &Value::Boolean(false));
     }
+}
+
+fn str_to_value<'lua>(
+    lua: &'lua Lua,
+    s: &str,
+) -> Result<Value<'lua>, ServerError> {
+    Ok(s.parse::<i64>()
+        .map(Value::Integer)
+        .ok()
+        .or_else(|| s.parse::<f64>().map(Value::Number).ok())
+        .or_else(|| s.parse::<bool>().map(Value::Boolean).ok())
+        .unwrap_or(Value::String(
+            lua.mlua().create_string(s).map_err(ServerError::LuaError)?,
+        )))
 }
