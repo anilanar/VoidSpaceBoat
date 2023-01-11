@@ -3,7 +3,7 @@ pub struct ServerTimer {
 }
 
 impl ServerTimer {
-    pub fn init() -> ServerTimer {
+    pub fn new() -> ServerTimer {
         ServerTimer {
             start_time: std::time::Instant::now(),
         }

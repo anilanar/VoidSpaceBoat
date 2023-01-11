@@ -11,7 +11,7 @@ use std::time;
 
 fn main() -> Result<(), ServerError> {
     env_logger::init();
-    let timer = ServerTimer::init();
+    let timer = ServerTimer::new();
     let lua = lua::Lua::new()?;
     let settings = settings::Settings::new(&lua)?;
 
