@@ -8,12 +8,14 @@ use mlua::Value;
 
 #[derive(Debug)]
 pub struct Settings<'lua> {
+    mlua: &'lua mlua::Lua,
     settings: HashMap<String, Value<'lua>>,
 }
 
 #[derive(Debug)]
 pub enum Error {
     ParseValueError { key: String },
+    MissingKey { key: String },
 }
 
 impl<'lua> Settings<'lua> {
@@ -29,11 +31,27 @@ impl<'lua> Settings<'lua> {
 
         let settings = populate_hashmap(lua)?;
 
-        Ok(Settings { settings })
+        Ok(Settings {
+            mlua: lua.mlua(),
+            settings,
+        })
     }
 
-    pub fn get(self: &Self, key: &str) -> Option<&Value<'lua>> {
-        self.settings.get(key)
+    pub fn try_get<R: mlua::FromLua<'lua>>(
+        self: &Self,
+        key: &str,
+    ) -> Result<R, ServerError> {
+        self.settings
+            .get(key)
+            .ok_or_else(|| {
+                ServerError::SettingsError(Error::MissingKey {
+                    key: key.to_owned(),
+                })
+            })
+            .and_then(|val| {
+                R::from_lua(val.to_owned(), self.mlua)
+                    .map_err(ServerError::LuaError)
+            })
     }
 }
 
@@ -154,7 +172,6 @@ fn apply_env_variables(lua: &Lua) -> Result<(), ServerError> {
 }
 
 #[cfg(test)]
-
 mod tests {
     use std::ffi::OsString;
 
@@ -162,7 +179,6 @@ mod tests {
     use crate::lua::Lua;
     use envtestkit::lock::lock_test;
     use envtestkit::set_env;
-    use mlua::Value;
 
     #[test]
     fn it_executes_lua() {
@@ -178,19 +194,16 @@ mod tests {
     fn it_loads_settings() {
         let lua = Lua::new().unwrap();
         let settings = Settings::new(&lua).unwrap();
-        let value = settings.get("main.SERVER_NAME").unwrap();
-        assert_eq!(
-            value,
-            &Value::String(lua.mlua().create_string("Nameless").unwrap())
-        );
+        let value = settings.try_get::<String>("main.SERVER_NAME").unwrap();
+        assert_eq!(value, "Nameless");
     }
 
     #[test]
     fn it_loads_int_settings() {
         let lua = Lua::new().unwrap();
         let settings = Settings::new(&lua).unwrap();
-        let value = settings.get("main.RIVERNE_PORTERS").unwrap();
-        assert_eq!(value, &Value::Integer(120));
+        let value = settings.try_get::<i64>("main.RIVERNE_PORTERS").unwrap();
+        assert_eq!(value, 120);
     }
 
     #[test]
@@ -198,17 +211,17 @@ mod tests {
         let lua = Lua::new().unwrap();
         let settings = Settings::new(&lua).unwrap();
         let value = settings
-            .get("main.USE_ADOULIN_WEAPON_SKILL_CHANGES")
+            .try_get::<bool>("main.USE_ADOULIN_WEAPON_SKILL_CHANGES")
             .unwrap();
-        assert_eq!(value, &Value::Boolean(true));
+        assert_eq!(value, true);
     }
 
     #[test]
     fn it_loads_float_settings() {
         let lua = Lua::new().unwrap();
         let settings = Settings::new(&lua).unwrap();
-        let value = settings.get("main.CASKET_DROP_RATE").unwrap();
-        assert_eq!(value, &Value::Number(0.1));
+        let value = settings.try_get::<f64>("main.CASKET_DROP_RATE").unwrap();
+        assert_eq!(value, 0.1);
     }
 
     #[test]
@@ -232,8 +245,8 @@ mod tests {
         let lua = Lua::new().unwrap();
         let settings = Settings::new(&lua).unwrap();
 
-        let value = settings.get("main.FOO_BAR").unwrap();
-        assert_eq!(value, &Value::Integer(9999));
+        let value = settings.try_get::<i64>("main.FOO_BAR").unwrap();
+        assert_eq!(value, 9999);
     }
 
     #[test]
@@ -244,8 +257,8 @@ mod tests {
         let lua = Lua::new().unwrap();
         let settings = Settings::new(&lua).unwrap();
 
-        let value = settings.get("main.FOO_BAR").unwrap();
-        assert_eq!(value, &Value::Boolean(false));
+        let value = settings.try_get::<bool>("main.FOO_BAR").unwrap();
+        assert_eq!(value, false);
     }
 }
 

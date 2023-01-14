@@ -7,7 +7,7 @@
       let pkgs = import nixpkgs { inherit system; };
       in {
         packages.default = home.packages.${system}.shells.rust {
-          extraInputs = with pkgs; [ pkg-config luajit ];
+          extraInputs = with pkgs; [ pkg-config luajit rustup ];
         };
       });
 }
