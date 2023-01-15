@@ -1,8 +1,9 @@
+use anyhow::{anyhow, Context, Result};
 use itertools::Itertools;
 use std::collections::HashMap;
 use std::str;
+use thiserror::Error;
 
-use super::error::ServerError;
 use super::lua::Lua;
 use mlua::Value;
 
@@ -12,14 +13,16 @@ pub struct Settings<'lua> {
     settings: HashMap<String, Value<'lua>>,
 }
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum Error {
+    #[error("could not parse key: {key:?}")]
     ParseValueError { key: String },
+    #[error("could not find key: {key:?}")]
     MissingKey { key: String },
 }
 
 impl<'lua> Settings<'lua> {
-    pub fn new(lua: &'lua Lua) -> Result<Settings, ServerError> {
+    pub fn new(lua: &'lua Lua) -> Result<Settings> {
         // load default settings
         load_lua_from_dir(lua, "settings/default")?;
 
@@ -40,17 +43,14 @@ impl<'lua> Settings<'lua> {
     pub fn try_get<R: mlua::FromLua<'lua>>(
         self: &Self,
         key: &str,
-    ) -> Result<R, ServerError> {
+    ) -> Result<R> {
         self.settings
             .get(key)
-            .ok_or_else(|| {
-                ServerError::SettingsError(Error::MissingKey {
-                    key: key.to_owned(),
-                })
-            })
+            .ok_or_else(|| anyhow!("Missing key in settings: {}", key))
             .and_then(|val| {
-                R::from_lua(val.to_owned(), self.mlua)
-                    .map_err(ServerError::LuaError)
+                R::from_lua(val.to_owned(), self.mlua).with_context(|| {
+                    format!("Could not parse lua value at key: {}", key)
+                })
             })
     }
 }
@@ -59,15 +59,13 @@ impl<'lua> Settings<'lua> {
 fn load_lua_from_dir<P: AsRef<std::path::Path>>(
     lua: &Lua,
     path: P,
-) -> Result<(), ServerError> {
-    let root = std::env::current_dir().map_err(ServerError::IOError)?;
+) -> Result<()> {
+    let root = std::env::current_dir()?;
 
     let mut paths = Vec::new();
 
-    for entry in
-        std::fs::read_dir(root.join(path)).map_err(ServerError::IOError)?
-    {
-        let entry = entry.map_err(ServerError::IOError)?;
+    for entry in std::fs::read_dir(root.join(path))? {
+        let entry = entry?;
         let path = entry.path();
         let is_lua = path.extension().map(|ext| ext == "lua").unwrap_or(false);
         if is_lua {
@@ -89,31 +87,19 @@ fn load_lua_from_dir<P: AsRef<std::path::Path>>(
 ///
 /// For example, if `xi.settings.foo.bar = 5`, then the hash map will contain
 /// `("foo.bar", SettingsValue::Int(5))` pair.
-fn populate_hashmap(lua: &Lua) -> Result<HashMap<String, Value>, ServerError> {
+fn populate_hashmap(lua: &Lua) -> Result<HashMap<String, Value>> {
     let table = lua
         .globals()
         .get::<_, mlua::Table>("xi")
-        .and_then(|table| table.get::<_, mlua::Table>("settings"))
-        .map_err(ServerError::LuaError)?;
+        .and_then(|table| table.get::<_, mlua::Table>("settings"))?;
 
     let mut settings = HashMap::<String, Value>::new();
 
     for outer_entry in table.pairs::<String, mlua::Table>() {
-        let (outer_key, outer_value) =
-            outer_entry.map_err(ServerError::LuaError)?;
+        let (outer_key, outer_value) = outer_entry?;
 
         for inner_entry in outer_value.pairs::<String, Value>() {
-            let (inner_key, inner_value) =
-                inner_entry.map_err(|err| match err {
-                    mlua::Error::FromLuaConversionError {
-                        from: _,
-                        to: _,
-                        message: _,
-                    } => ServerError::SettingsError(Error::ParseValueError {
-                        key: format!("{}.{}", outer_key, "?"),
-                    }),
-                    _ => ServerError::LuaError(err),
-                })?;
+            let (inner_key, inner_value) = inner_entry?;
 
             settings
                 .insert(format!("{}.{}", outer_key, inner_key), inner_value);
@@ -125,7 +111,7 @@ fn populate_hashmap(lua: &Lua) -> Result<HashMap<String, Value>, ServerError> {
 
 /// Finds env variables of the format `XI_a_b`, then proceeeds to add
 /// sets `xi.settings.a.b` to the relevant value.
-fn apply_env_variables(lua: &Lua) -> Result<(), ServerError> {
+fn apply_env_variables(lua: &Lua) -> Result<()> {
     // lua indices start at 1
     let mut idx: usize = 1;
     let mut code: String = String::new();
@@ -163,12 +149,11 @@ fn apply_env_variables(lua: &Lua) -> Result<(), ServerError> {
         code
     );
 
-    lua.mlua()
+    Ok(lua
+        .mlua()
         .load(&fn_whole)
-        .eval::<mlua::Function>()
-        .map_err(ServerError::LuaError)?
-        .call::<_, ()>(values)
-        .map_err(ServerError::LuaError)
+        .eval::<mlua::Function>()?
+        .call::<_, ()>(values)?)
 }
 
 #[cfg(test)]
@@ -262,16 +247,11 @@ mod tests {
     }
 }
 
-fn str_to_value<'lua>(
-    lua: &'lua Lua,
-    s: &str,
-) -> Result<Value<'lua>, ServerError> {
+fn str_to_value<'lua>(lua: &'lua Lua, s: &str) -> Result<Value<'lua>> {
     Ok(s.parse::<i64>()
         .map(Value::Integer)
         .ok()
         .or_else(|| s.parse::<f64>().map(Value::Number).ok())
         .or_else(|| s.parse::<bool>().map(Value::Boolean).ok())
-        .unwrap_or(Value::String(
-            lua.mlua().create_string(s).map_err(ServerError::LuaError)?,
-        )))
+        .unwrap_or(Value::String(lua.mlua().create_string(s)?)))
 }

@@ -1,33 +1,30 @@
 use std::sync::Arc;
 
+use anyhow::Result;
 use spdlog::{
     sink::{
         AsyncPoolSink, FileSink, RotatingFileSink, RotationPolicy, Sink,
         StdStream, StdStreamSink,
     },
-    Level, LevelFilter, Logger, LoggerBuilder, ThreadPool, ThreadPoolBuilder,
+    Level, LevelFilter, Logger, LoggerBuilder,
 };
-
-use crate::error::ServerError;
 
 pub fn builder(
     file: impl Into<std::path::PathBuf>,
     append_date: bool,
-) -> Result<LoggerBuilder, ServerError> {
+) -> Result<LoggerBuilder> {
     let mut sinks: Vec<Arc<dyn Sink>> = vec![
         Arc::new(
             StdStreamSink::builder()
                 .std_stream(StdStream::Stdout)
                 .level_filter(LevelFilter::MoreVerbose(Level::Warn))
-                .build()
-                .map_err(ServerError::LoggerError)?,
+                .build()?,
         ),
         Arc::new(
             StdStreamSink::builder()
                 .std_stream(StdStream::Stderr)
                 .level_filter(LevelFilter::MoreSevereEqual(Level::Warn))
-                .build()
-                .map_err(ServerError::LoggerError)?,
+                .build()?,
         ),
     ];
 
@@ -37,25 +34,15 @@ pub fn builder(
                 .base_path(file)
                 .rotation_policy(RotationPolicy::Daily { hour: 0, minute: 0 })
                 .rotate_on_open(true)
-                .build()
-                .map_err(ServerError::LoggerError)?,
+                .build()?,
         ));
     } else {
         sinks.push(Arc::new(
-            FileSink::builder()
-                .path(file)
-                .truncate(false)
-                .build()
-                .map_err(ServerError::LoggerError)?,
+            FileSink::builder().path(file).truncate(false).build()?,
         ));
     };
 
-    let async_sink = Arc::new(
-        AsyncPoolSink::builder()
-            .sinks(sinks)
-            .build()
-            .map_err(ServerError::LoggerError)?,
-    );
+    let async_sink = Arc::new(AsyncPoolSink::builder().sinks(sinks).build()?);
 
     let mut builder = Logger::builder();
     builder.flush_level_filter(LevelFilter::MoreSevereEqual(Level::Warn));

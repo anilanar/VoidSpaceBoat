@@ -1,6 +1,6 @@
+use anyhow::Result;
 use mlua;
 
-use super::error::ServerError;
 use itertools::Itertools;
 
 pub struct Lua {
@@ -8,8 +8,8 @@ pub struct Lua {
 }
 
 impl Lua {
-    pub fn new() -> Result<Lua, ServerError> {
-        Lua::_new().map_err(ServerError::LuaError)
+    pub fn new() -> Result<Lua> {
+        Ok(Lua::_new()?)
     }
 
     fn _new() -> Result<Lua, mlua::Error> {
@@ -45,8 +45,8 @@ impl Lua {
     pub fn execute_file(
         self: &Lua,
         path: &std::path::PathBuf,
-    ) -> Result<(), ServerError> {
-        self.mlua.load(path).exec().map_err(ServerError::LuaError)?;
+    ) -> Result<()> {
+        self.mlua.load(path).exec()?;
         Ok(())
     }
 
@@ -57,7 +57,7 @@ impl Lua {
     pub fn eval<'a, R: mlua::FromLuaMulti<'a>>(
         self: &'a Lua,
         code: &str,
-    ) -> Result<R, ServerError> {
-        self.mlua.load(code).eval().map_err(ServerError::LuaError)
+    ) -> Result<R> {
+        Ok(self.mlua.load(code).eval()?)
     }
 }

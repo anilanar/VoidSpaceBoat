@@ -1,15 +1,13 @@
+use anyhow::Result;
 use ipnetwork::Ipv4Network;
-use log::LevelFilter;
-use rlimit::setrlimit;
-use spdlog::{prelude::*, sink::Sink};
+use spdlog::prelude::*;
 use spdlog::{Logger, LoggerBuilder};
 use std::net::Ipv4Addr;
 use std::ops::Deref;
-use std::str::{FromStr, Split};
+use std::str::FromStr;
 use std::time::Duration;
 
-use crate::{error::ServerError, settings::Settings};
-use mlua::{FromLua, Value};
+use crate::settings::Settings;
 
 struct SocketBuilder {
     enable_ip_rules: bool,
@@ -172,7 +170,7 @@ impl AccessOrder {
 fn socket_init_tcp(
     mut log_builder: LoggerBuilder,
     settings: &Settings,
-) -> Result<Socket, ServerError> {
+) -> Result<Socket> {
     let enable_logger = settings.try_get::<bool>("network.TCP_DEBUG")?
         || settings.try_get::<bool>("logging.DEBUG_SOCKETS")?;
 
@@ -183,8 +181,7 @@ fn socket_init_tcp(
             spdlog::LevelFilter::Off
         })
         .name("tcp")
-        .build()
-        .map_err(ServerError::LoggerError)?;
+        .build()?;
 
     Ok(Socket::builder()
         .stall_time(Duration::from_secs(
